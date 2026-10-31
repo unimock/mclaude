@@ -1,0 +1,285 @@
+#!/bin/sh
+
+# Version, baked in at deploy time (= the VERSION file = the bundled Claude Code
+# release). Wrapper users update solely by deploying a new copy of this script: it
+# reports this version AND pins the matching image tag it runs, so the script is the
+# single update vehicle (see README).
+MCLAUDE_VERSION="2.1.314"
+MCLAUDE_IMAGE="unimock/mclaude:${MCLAUDE_VERSION}"
+
+# mclaude's own options (--mclaude-*) may appear anywhere among the args; they are
+# taken out here and everything else passes through to claude unchanged.
+#   --mclaude-version       report the wrapper/image build (`--version` is claude's)
+#   --mclaude-docker        mount the host's Docker socket
+#   --mclaude-host-network  run the container with `--network host`
+OPT_DOCKER=
+OPT_HOST_NETWORK=
+n=$#
+while [ "$n" -gt 0 ]; do
+  case "$1" in
+    --mclaude-version)
+      echo "mclaude ${MCLAUDE_VERSION}"
+      exit 0
+      ;;
+    --mclaude-docker)       OPT_DOCKER=1 ;;
+    --mclaude-host-network) OPT_HOST_NETWORK=1 ;;
+    --mclaude-*)
+      echo "mclaude: unknown option '$1'" >&2
+      exit 2
+      ;;
+    *) set -- "$@" "$1" ;;
+  esac
+  shift
+  n=$((n - 1))
+done
+
+if [ "$PWD" = "$HOME" ]; then
+  echo "Error: claude must not be run from the home directory." >&2
+  exit 1
+fi
+
+
+# Areas: each lives in ~/.mclaude/area/<name>/ with an area.conf (`path` +
+# `args`) and, optionally, .ssh/, .docker/ and .gitconfig, which are mounted
+# into the container when present. If $PWD lies at or below an area's path,
+# that directory is mounted instead of just $PWD; claude still starts in $PWD
+# (CLAUDE_WORKDIR), but sees the whole tree. The longest matching path wins and
+# only its args are used. No match → area "default" (just $PWD, its args).
+MCLAUDE_DIR="$HOME/.mclaude"
+AREA_ROOT="$MCLAUDE_DIR/area"
+DEFAULT_DIR="$AREA_ROOT/default"
+
+# First run: create the default area with a commented-out area.conf and an
+# .ssh dir (key generated inside). Carry over the SSH keys of the former
+# global ~/.mclaude/.ssh, so a key registered at GitHub & co. stays valid.
+if [ ! -d "$DEFAULT_DIR" ]; then
+  mkdir -p "$DEFAULT_DIR/.ssh"
+  if [ -d "$MCLAUDE_DIR/.ssh" ]; then
+    cp -pR "$MCLAUDE_DIR/.ssh/." "$DEFAULT_DIR/.ssh/"
+    echo "mclaude: copied ~/.mclaude/.ssh into area 'default'." >&2
+  fi
+  chmod 700 "$DEFAULT_DIR/.ssh"
+  cat > "$DEFAULT_DIR/area.conf" <<'EOT'
+# mclaude area "default"
+#
+# Areas live in ~/.mclaude/area/<name>/. When mclaude starts at or below the
+# `path` of an area, that whole directory is mounted into the container (same
+# path), while claude still starts in the current directory. The longest
+# matching path wins; / and $HOME itself are refused. If no area matches, this
+# area "default" is used: only the current directory is mounted, and `path` is
+# ignored here.
+#
+# An area directory may contain (each optional, mounted if present):
+#   .ssh/       -> /home/claude/.ssh        SSH client keys; id_ed25519 is generated if missing
+#   .docker/    -> /home/claude/.docker     Docker client config, `docker login` creds
+#   .gitconfig  -> /home/claude/.gitconfig  git identity
+#
+# area.conf: one `key = value` per line, `#` comments:
+#   path = <dir>    absolute, a leading ~ means $HOME (not used in "default")
+#   args = <args>   extra `docker run` args, may repeat. Split on whitespace (no
+#                   quoting, no globbing); ~/ at the start of a word or right
+#                   after `:` or `=` means $HOME.
+#
+# The host's Docker socket makes an area root-equivalent on the host; mount it
+# deliberately (or per run with --mclaude-docker):
+#   args = -v /var/run/docker.sock:/var/run/docker.sock
+#
+# Example ~/.mclaude/area/mygits/area.conf:
+#   path = ~/MyGits
+#   args = -v /var/run/docker.sock:/var/run/docker.sock
+#   args = -p 8080:8080 -e FOO=bar
+EOT
+fi
+
+if [ -e "$MCLAUDE_DIR/trusted_areas" ]; then
+  echo "mclaude: ~/.mclaude/trusted_areas is no longer read; move its entries to ~/.mclaude/area/<name>/area.conf (see README), then delete it." >&2
+fi
+
+# Strip leading and trailing whitespace from $1.
+trim() {
+  _t="$1"
+  _t="${_t#"${_t%%[![:space:]]*}"}"
+  _t="${_t%"${_t##*[![:space:]]}"}"
+  printf '%s' "$_t"
+}
+
+# Expand ~/ in an area arg: at the start of the word and right after each `:`
+# or `=` (e.g. `-v ~/a:~/b`, `--env=DIR=~/x`). Nothing else expands.
+expand_tilde() {
+  _w="$1"
+  _o=
+  # shellcheck disable=SC2088  # matching a literal ~ on purpose
+  case "$_w" in
+    '~')   printf '%s' "$HOME"; return ;;
+    '~/'*) _o="$HOME/"; _w="${_w#\~/}" ;;
+  esac
+  while :; do
+    case "$_w" in
+      *[:=]'~/'*)
+        _pre="${_w%%[:=]\~/*}"
+        _w="${_w#"$_pre"}"
+        _sep="${_w%"${_w#?}"}"
+        _w="${_w#?\~/}"
+        _o="$_o$_pre$_sep$HOME/"
+        ;;
+      *) break ;;
+    esac
+  done
+  printf '%s' "$_o$_w"
+}
+
+# Read area.conf $1 into CONF_PATH and CONF_ARGS (all `args` lines joined).
+# Plain `key = value` parsing, nothing is sourced or evaluated.
+read_area_conf() {
+  CONF_PATH=
+  CONF_ARGS=
+  # `|| [ -n ]` keeps a last line without newline.
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    _line=$(trim "$_line")
+    case "$_line" in
+      ''|'#'*) continue ;;
+      *=*) ;;
+      *) echo "mclaude: ignoring malformed line in $1: $_line" >&2; continue ;;
+    esac
+    _key=$(trim "${_line%%=*}")
+    _val=$(trim "${_line#*=}")
+    case "$_key" in
+      path) CONF_PATH="$_val" ;;
+      args) CONF_ARGS="${CONF_ARGS:+$CONF_ARGS }$_val" ;;
+      *) echo "mclaude: ignoring unknown key '$_key' in $1" >&2 ;;
+    esac
+  done < "$1"
+}
+
+AREA_NAME=default
+AREA_DIR="$DEFAULT_DIR"
+MOUNT_DIR="$PWD"
+EXTRA_ARGS=
+found=
+best=
+for conf in "$AREA_ROOT"/*/area.conf; do
+  [ -f "$conf" ] || continue
+  dir="${conf%/area.conf}"
+  name="${dir##*/}"
+  [ "$name" != default ] || continue
+  read_area_conf "$conf"
+  area="$CONF_PATH"
+  if [ -z "$area" ]; then
+    echo "mclaude: ignoring area '$name': no path in $conf" >&2
+    continue
+  fi
+  # shellcheck disable=SC2088  # matching a literal ~ on purpose
+  case "$area" in
+    '~')   area="$HOME" ;;
+    '~/'*) area="$HOME/${area#\~/}" ;;
+  esac
+  case "$area" in
+    /*) ;;
+    *) echo "mclaude: ignoring area '$name': path '$area' is not absolute" >&2; continue ;;
+  esac
+  # Strip trailing slashes ("/" becomes "", which matches everything below).
+  while [ "${area%/}" != "$area" ]; do area="${area%/}"; done
+  # Match on a path boundary: /a/b matches /a/b and /a/b/x, but not /a/bc.
+  case "$PWD/" in "$area"/*) ;; *) continue ;; esac
+  if [ -z "$found" ] || [ "${#area}" -gt "${#best}" ]; then
+    found=1
+    best="$area"
+    AREA_NAME="$name"
+    AREA_DIR="$dir"
+    EXTRA_ARGS="$CONF_ARGS"
+  fi
+done
+if [ -n "$found" ]; then
+  if [ -z "$best" ] || [ "$best" = "${HOME%/}" ]; then
+    echo "Error: area '$AREA_NAME' would mount ${best:-/} (/ or the home directory)." >&2
+    exit 1
+  fi
+  MOUNT_DIR="$best"
+elif [ -f "$DEFAULT_DIR/area.conf" ]; then
+  read_area_conf "$DEFAULT_DIR/area.conf"
+  [ -z "$CONF_PATH" ] || echo "mclaude: area 'default' ignores its path." >&2
+  EXTRA_ARGS="$CONF_ARGS"
+fi
+
+# True if the area args already mount something at container path $1 (Docker
+# refuses a duplicate mount point).
+args_mount() {
+  case " $EXTRA_ARGS " in
+    *":$1 "*|*":$1:"*) return 0 ;;
+  esac
+  return 1
+}
+
+# Command-line opt-ins, skipped where the area's args already have them.
+if [ -n "$OPT_DOCKER" ] && ! args_mount /var/run/docker.sock; then
+  EXTRA_ARGS="$EXTRA_ARGS -v /var/run/docker.sock:/var/run/docker.sock"
+fi
+if [ -n "$OPT_HOST_NETWORK" ]; then
+  case " $EXTRA_ARGS " in
+    *' --network host '*|*' --network=host '*|*' --net host '*|*' --net=host '*) ;;
+    *) EXTRA_ARGS="$EXTRA_ARGS --network host" ;;
+  esac
+fi
+
+# Pre-create the config dir so Docker doesn't auto-create the bind-mount source
+# as a root-owned directory (which then needs an in-container chown to fix).
+mkdir -p "$MCLAUDE_DIR/.claude"
+
+# Claude Code keeps its primary state (login/OAuth, onboarding, projects, MCP
+# servers) in ~/.claude.json — a sibling of the .claude dir, NOT inside it. Touch
+# it as a FILE first so the bind-mount source exists; otherwise Docker would
+# auto-create it as a directory and claude would fail to write the JSON.
+[ -e "$MCLAUDE_DIR/.claude.json" ] || touch "$MCLAUDE_DIR/.claude.json"
+
+TZ_NAME=$(cat /etc/timezone 2>/dev/null || readlink -f /etc/localtime | sed 's@.*/zoneinfo/@@')
+
+# Allocate a TTY only when running interactively. With piped input
+# (e.g. `echo hi | mclaude -p`) stdin is not a TTY and `-t` would fail
+# with "the input device is not a TTY".
+TTY_FLAG=
+if [ -t 0 ] && [ -t 1 ]; then
+  TTY_FLAG=-t
+fi
+
+# Build the tail of the docker command in the positional parameters:
+#   <area mounts...> <area args...> <image> claude-wrapper <claude args...>
+# The area's .ssh/.docker/.gitconfig are mounted if present (and not already
+# mounted by its args). EXTRA_ARGS is split on whitespace on purpose; `set -f`
+# keeps a `*` in it from globbing. Each word is ~-expanded and kept as one word,
+# so a $HOME with spaces survives. The claude args are appended first and then
+# rotated behind the rest.
+n=$#
+set -f
+if [ -d "$AREA_DIR/.ssh" ] && ! args_mount /home/claude/.ssh; then
+  set -- "$@" -v "$AREA_DIR/.ssh:/home/claude/.ssh"
+fi
+if [ -d "$AREA_DIR/.docker" ] && ! args_mount /home/claude/.docker; then
+  set -- "$@" -v "$AREA_DIR/.docker:/home/claude/.docker"
+fi
+if [ -f "$AREA_DIR/.gitconfig" ] && ! args_mount /home/claude/.gitconfig; then
+  set -- "$@" -v "$AREA_DIR/.gitconfig:/home/claude/.gitconfig"
+fi
+for word in $EXTRA_ARGS; do
+  set -- "$@" "$(expand_tilde "$word")"
+done
+set -- "$@" "$MCLAUDE_IMAGE" /usr/local/bin/claude-wrapper
+while [ "$n" -gt 0 ]; do
+  set -- "$@" "$1"
+  shift
+  n=$((n - 1))
+done
+
+exec docker run -i $TTY_FLAG --rm -v "$MOUNT_DIR":"$MOUNT_DIR" \
+                         -e CLAUDE_WORKDIR="$PWD" \
+                         -e CLAUDE_UID="$(id -u)" \
+                         -e CLAUDE_GID="$(id -g)" \
+                         -e CLAUDE_USER="$(id -un)" \
+                         -e CLAUDE_GROUP="$(id -gn)" \
+                         -e MCLAUDE_AREA="$AREA_NAME" \
+                         -e TZ="$TZ_NAME" \
+                         -e TERM="${TERM:-xterm-256color}" \
+                         -e COLORTERM="${COLORTERM:-truecolor}" \
+                         -v /etc/localtime:/etc/localtime:ro \
+                         -v "$MCLAUDE_DIR/.claude":/home/claude/.claude \
+                         -v "$MCLAUDE_DIR/.claude.json":/home/claude/.claude.json \
+                         "$@"

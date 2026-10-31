@@ -1,0 +1,20 @@
+#!/bin/sh -e
+
+# Container entrypoint: map the image user onto the host user (setup.sh sets
+# RUN_USER), then run claude in CLAUDE_WORKDIR with the given args.
+# shellcheck source=mclaude-setup
+. /usr/local/lib/mclaude/setup.sh
+
+if [ "$CLAUDE_UID" -eq 0 ]; then
+    # Root host user: run claude directly as root (see setup.sh).
+    cd "$CLAUDE_WORKDIR"
+    exec /usr/local/bin/claude "$@"
+fi
+
+# NOTE: the `--` is required. Without it, su (util-linux) permutes the
+# argument list and swallows anything starting with `-` (e.g. `-p`,
+# `--debug`) as its own options instead of passing them to claude. The
+# `--` ends su's option parsing so the trailing args reach the -c shell
+# as positional parameters ($@). No $0 token is passed (su uses `-`),
+# which claude ignores.
+exec su "$RUN_USER" - -c "export TERM='${TERM:-xterm-256color}'; export COLORTERM='${COLORTERM:-truecolor}'; cd '$CLAUDE_WORKDIR' && exec /usr/local/bin/claude \"\$@\"" -- "$@"
