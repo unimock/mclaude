@@ -4,7 +4,7 @@
 # release). Wrapper users update solely by deploying a new copy of this script: it
 # reports this version AND pins the matching image tag it runs, so the script is the
 # single update vehicle (see README).
-MCLAUDE_VERSION="2.1.314"
+MCLAUDE_VERSION="2.1.316"
 MCLAUDE_IMAGE="unimock/mclaude:${MCLAUDE_VERSION}"
 
 # mclaude's own options (--mclaude-*) may appear anywhere among the args; they are
