@@ -27,9 +27,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     iputils-ping \
     socat \
     rsync \
+    git-delta \
     && git lfs install --system \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 # add more dependencies above if needed
+
+# delta as git pager, system-wide. Appended: /etc/gitconfig already holds the
+# git-lfs filter. An area's ~/.gitconfig can still override every setting.
+# Side by side for one call: git -c delta.side-by-side=true diff
+RUN cat >> /etc/gitconfig <<'EOF'
+[core]
+	pager = delta
+[interactive]
+	diffFilter = delta --color-only
+[delta]
+	navigate = true
+	line-numbers = true
+[merge]
+	conflictStyle = zdiff3
+EOF
 
 # Docker CLI + buildx/compose plugins from Docker's Debian repository (codename
 # read from os-release). Only usable where the socket is mounted (area args or

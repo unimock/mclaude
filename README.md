@@ -126,7 +126,7 @@ args = -p 8080:8080 -e FOO=bar
 
 - Base: `debian:trixie-slim`
 - Claude Code (npm global, owned by the user, so it can self-update)
-- Node.js, npm, git, git-lfs, curl, jq, ripgrep, fd-find, rsync, socat, vim
+- Node.js, npm, git, git-lfs, curl, jq, ripgrep, fd-find, delta (git pager), rsync, socat, vim
 - python3 with pip and venv, g++, shellcheck, ping, openssh-client
 - Docker CLI with buildx and compose
 - sudo without password
