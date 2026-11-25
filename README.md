@@ -59,6 +59,7 @@ If no area matches, the area **`default`** is used: only `$PWD` is mounted, plus
     area.conf
     .ssh/               # optional
     .docker/            # optional
+    .config/            # optional
     .gitconfig          # optional
 ```
 
@@ -81,6 +82,7 @@ args = -p 8080:8080 -e FOO=bar
 |---|---|---|
 | `.ssh/` | `/home/claude/.ssh` | SSH client keys. `id_ed25519` is generated if missing (its public key is printed). |
 | `.docker/` | `/home/claude/.docker` | Docker client config, `docker login` credentials |
+| `.config/` | `/home/claude/.config` | `~/.config` of the tools in the container (XDG config, e.g. env files) |
 | `.gitconfig` | `/home/claude/.gitconfig` | git identity |
 
 **Rules**

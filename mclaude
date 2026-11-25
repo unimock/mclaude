@@ -40,8 +40,8 @@ fi
 
 
 # Areas: each lives in ~/.mclaude/area/<name>/ with an area.conf (`path` +
-# `args`) and, optionally, .ssh/, .docker/ and .gitconfig, which are mounted
-# into the container when present. If $PWD lies at or below an area's path,
+# `args`) and, optionally, .ssh/, .docker/, .config/ and .gitconfig, which are
+# mounted into the container when present. If $PWD lies at or below an area's path,
 # that directory is mounted instead of just $PWD; claude still starts in $PWD
 # (CLAUDE_WORKDIR), but sees the whole tree. The longest matching path wins and
 # only its args are used. No match → area "default" (just $PWD, its args).
@@ -72,6 +72,7 @@ if [ ! -d "$DEFAULT_DIR" ]; then
 # An area directory may contain (each optional, mounted if present):
 #   .ssh/       -> /home/claude/.ssh        SSH client keys; id_ed25519 is generated if missing
 #   .docker/    -> /home/claude/.docker     Docker client config, `docker login` creds
+#   .config/    -> /home/claude/.config     XDG config of tools (~/.config), e.g. env files
 #   .gitconfig  -> /home/claude/.gitconfig  git identity
 #
 # area.conf: one `key = value` per line, `#` comments:
@@ -243,7 +244,7 @@ fi
 
 # Build the tail of the docker command in the positional parameters:
 #   <area mounts...> <area args...> <image> claude-wrapper <claude args...>
-# The area's .ssh/.docker/.gitconfig are mounted if present (and not already
+# The area's .ssh/.docker/.config/.gitconfig are mounted if present (and not already
 # mounted by its args). EXTRA_ARGS is split on whitespace on purpose; `set -f`
 # keeps a `*` in it from globbing. Each word is ~-expanded and kept as one word,
 # so a $HOME with spaces survives. The claude args are appended first and then
@@ -255,6 +256,9 @@ if [ -d "$AREA_DIR/.ssh" ] && ! args_mount /home/claude/.ssh; then
 fi
 if [ -d "$AREA_DIR/.docker" ] && ! args_mount /home/claude/.docker; then
   set -- "$@" -v "$AREA_DIR/.docker:/home/claude/.docker"
+fi
+if [ -d "$AREA_DIR/.config" ] && ! args_mount /home/claude/.config; then
+  set -- "$@" -v "$AREA_DIR/.config:/home/claude/.config"
 fi
 if [ -f "$AREA_DIR/.gitconfig" ] && ! args_mount /home/claude/.gitconfig; then
   set -- "$@" -v "$AREA_DIR/.gitconfig:/home/claude/.gitconfig"
