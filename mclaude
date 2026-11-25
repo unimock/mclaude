@@ -273,7 +273,10 @@ while [ "$n" -gt 0 ]; do
   n=$((n - 1))
 done
 
-exec docker run -i $TTY_FLAG --rm -v "$MOUNT_DIR":"$MOUNT_DIR" \
+# rslave: mounts the host adds under MOUNT_DIR after start (e.g. autofs/CIFS
+# shares triggered on first access) propagate into the container. Needs the
+# host's / to be shared, which is the systemd default.
+exec docker run -i $TTY_FLAG --rm -v "$MOUNT_DIR":"$MOUNT_DIR":rslave \
                          -e CLAUDE_WORKDIR="$PWD" \
                          -e CLAUDE_UID="$(id -u)" \
                          -e CLAUDE_GID="$(id -g)" \
