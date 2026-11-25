@@ -84,6 +84,11 @@ if [ "$CLAUDE_UID" -eq 0 ]; then
     export COLORTERM="${COLORTERM:-truecolor}"
     add_user_to_docker_group "$RUN_USER"
     ensure_ssh_key root 0:0
+    # OpenSSH ignores $HOME and takes root's home from /etc/passwd (/root), so
+    # it would miss the area's config, key and known_hosts. Point it there.
+    if [ -d /home/claude/.ssh ] && [ ! -e /root/.ssh ]; then
+        ln -s /home/claude/.ssh /root/.ssh
+    fi
     fix_docker_config 0:0
 else
     # --- non-root host user: remap `claude` to match ---
